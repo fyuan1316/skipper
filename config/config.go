@@ -323,6 +323,11 @@ type Config struct {
 	OpenPolicyAgentMaxMemoryBodyParsing                int64         `yaml:"open-policy-agent-max-memory-body-parsing"`
 
 	PassiveHealthCheck mapFlags `yaml:"passive-health-check"`
+
+	// alauda extension
+
+	EnableK8sAuditLog bool   `yaml:"enable-k8s-audit-log"`
+	K8sAuditLogPath   string `yaml:"k8s-audit-log-path"`
 }
 
 const (
@@ -643,6 +648,9 @@ func NewConfig() *Config {
 
 	// Passive Health Checks
 	flag.Var(&cfg.PassiveHealthCheck, "passive-health-check", "sets the parameters for passive health check feature")
+
+	// alauda extension
+	flag.StringVar(&cfg.K8sAuditLogPath, "k8s-audit-log", "", "output file for the k8s audit log.")
 
 	cfg.Flags = flag
 	return cfg
@@ -1040,6 +1048,9 @@ func (c *Config) ToOptions() skipper.Options {
 		OpenPolicyAgentMaxMemoryBodyParsing:                c.OpenPolicyAgentMaxMemoryBodyParsing,
 
 		PassiveHealthCheck: c.PassiveHealthCheck.values,
+
+		// alauda extension
+		K8sAuditLogPath: c.K8sAuditLogPath,
 	}
 	for _, rcci := range c.CloneRoute {
 		eskipClone := eskip.NewClone(rcci.Reg, rcci.Repl)
@@ -1126,6 +1137,10 @@ func (c *Config) ToOptions() skipper.Options {
 				Handler: handler,
 			}
 		})
+	}
+
+	if c.K8sAuditLogPath != "" {
+		options.EnableK8sAuditLog = true
 	}
 
 	return options

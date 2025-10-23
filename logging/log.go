@@ -49,6 +49,11 @@ type Options struct {
 
 	// AccessLogFormatter, when set is passed along to the underlying Logrus logger for access logs.
 	AccessLogFormatter logrus.Formatter
+
+	// K8sAuditOutput specifies the output target for asynchronous Kubernetes audit log events.
+	// When nil, os.Stderr is used, but it's recommended to provide a file path or a dedicated stream
+	// for reliable logging.
+	K8sAuditOutput io.Writer
 }
 
 func (f *prefixFormatter) Format(e *logrus.Entry) ([]byte, error) {

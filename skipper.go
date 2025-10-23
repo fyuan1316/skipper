@@ -38,6 +38,7 @@ import (
 	"github.com/zalando/skipper/filters/block"
 	"github.com/zalando/skipper/filters/builtin"
 	"github.com/zalando/skipper/filters/fadein"
+	k8sauditlogfilter "github.com/zalando/skipper/filters/k8sauditlog"
 	logfilter "github.com/zalando/skipper/filters/log"
 	"github.com/zalando/skipper/filters/openpolicyagent"
 	"github.com/zalando/skipper/filters/openpolicyagent/opaauthorizerequest"
@@ -1011,6 +1012,10 @@ type Options struct {
 	ValidationWebhookCertFile string
 	ValidationWebhookKeyFile  string
 	EnableAdvancedValidation  bool
+
+	// k8s audit log
+	EnableK8sAuditLog bool
+	K8sAuditLogPath   string
 }
 
 func (o *Options) KubernetesDataClientOptions() kubernetes.Options {
@@ -1665,6 +1670,26 @@ func run(o Options, sig chan os.Signal, idleConnsCH chan struct{}) error {
 		log.Warning("no route source specified")
 	}
 
+	var logChannel k8sauditlogfilter.LogChannel
+	var logCollectorDone chan struct{}
+
+	// 假设 Options 中新增了 EnableK8sAuditLog 和 K8sAuditLogPath 字段
+	if o.EnableK8sAuditLog {
+		// 1. 创建 Channel
+		logChannel = make(k8sauditlogfilter.LogChannel, 10000)
+		logCollectorDone = make(chan struct{})
+
+		// 2. 启动 Collector Goroutine
+		k8sAuditOutput, err := getLogOutput(o.K8sAuditLogPath)
+		if err != nil {
+			return err
+		}
+
+		go k8sauditlogfilter.StartLogCollector(logChannel, k8sAuditOutput, logCollectorDone)
+
+		log.Infof("K8s Audit Logging enabled. Buffer size: 10000, Path: %s", o.K8sAuditLogPath)
+	}
+
 	o.PluginDirs = append(o.PluginDirs, o.PluginDir)
 
 	var (
@@ -1794,6 +1819,11 @@ func run(o Options, sig chan os.Signal, idleConnsCH chan struct{}) error {
 		),
 		admissionControlFilter,
 	)
+
+	if o.EnableK8sAuditLog && logChannel != nil {
+		k8sSpec := k8sauditlogfilter.NewK8sAuditLog(logChannel, o.MaxAuditBody)
+		o.CustomFilters = append(o.CustomFilters, k8sSpec)
+	}
 
 	if o.OIDCSecretsFile != "" {
 		oidcClientId, _ := os.LookupEnv("OIDC_CLIENT_ID")
