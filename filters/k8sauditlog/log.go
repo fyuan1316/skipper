@@ -2,22 +2,31 @@ package k8sauditlog
 
 import (
 	"bytes"
+	"context"
+	"github.com/google/uuid"
 	"github.com/zalando/skipper/filters"
 	"io"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	utilnet "k8s.io/apimachinery/pkg/util/net"
+	auditinternal "k8s.io/apiserver/pkg/apis/audit"
+	"k8s.io/apiserver/pkg/authentication/authenticator"
+	"net/http"
+	"strings"
 	"time"
 )
 
 type asyncAuditLogFilter struct {
 	logCh      LogChannel
 	maxBodyLog int
+
+	tokenParser authenticator.Token
 }
 
 func NewK8sAuditLog(ch LogChannel, maxBody int) filters.Spec {
 	return &asyncAuditLogFilter{
-		logCh:      ch,
-		maxBodyLog: maxBody,
+		logCh:       ch,
+		maxBodyLog:  maxBody,
+		tokenParser: NewOIDCTokenParser(),
 	}
 }
 
@@ -59,9 +68,6 @@ func (a asyncAuditLogFilter) Response(ctx filters.FilterContext) {
 	sb := ctx.StateBag()
 
 	reqTimeVal := sb["requestRecievedTimestamp"].(metav1.MicroTime)
-	user, _ := sb[AuthUserKey].(string)
-	reason, _ := sb[AuthRejectReasonKey].(string)
-
 	userAgent, _ := sb["userAgent"].(string)
 	sourceIPs, _ := sb["sourceIPs"].([]string)
 
@@ -72,23 +78,82 @@ func (a asyncAuditLogFilter) Response(ctx filters.FilterContext) {
 		}
 	}
 
-	rawData := RawLogData{
-		Method:       req.Method,
-		RequestURI:   req.URL.RequestURI(),
-		Status:       rsp.StatusCode,
-		UserAgent:    userAgent,
-		SourceIPs:    sourceIPs,
-		Username:     user,
-		RejectReason: reason,
-		RequestBody:  reqBodyStr,
-		ReceivedAt:   reqTimeVal,
+	ids := req.Header.Get(auditinternal.HeaderAuditID)
+	if ids == "" {
+		ids = uuid.New().String()
 	}
+
+	statusCode := int32(rsp.StatusCode)
+	status := statusSuccess
+	if statusCode >= 400 {
+		status = statusFailure
+	}
+	rawData := RawLogData{
+		Level:          string(auditinternal.LevelMetadata),
+		Stage:          string(auditinternal.StageResponseComplete),
+		RequestURI:     req.URL.RequestURI(),
+		UserAgent:      maybeTruncateUserAgent(userAgent),
+		RequestObject:  reqBodyStr,
+		ResponseObject: "",
+		ResponseStatus: &metav1.Status{Status: status, Code: statusCode},
+		ReceivedAt:     reqTimeVal,
+		StageTimestamp: metav1.NewMicroTime(time.Now()),
+		AuditIDHeader:  ids,
+		SourceIPs:      sourceIPs,
+		//User:           userInfo,
+		Verb:      req.Method,
+		ObjectRef: &auditinternal.ObjectReference{},
+	}
+	ProcessUserInfo(a.tokenParser, &rawData, req)
 
 	select {
 	case a.logCh <- rawData:
 	default:
 
 	}
+}
+
+func ProcessUserInfo(tokenParser authenticator.Token, data *RawLogData, req *http.Request) {
+	data.User = UserInfo{
+		Username: anonymousUser,
+	}
+
+	token := GetToken(req)
+	if token == "" {
+		return
+	}
+
+	userResp, _, err := tokenParser.AuthenticateToken(context.TODO(), token)
+	if err != nil {
+		return
+	}
+	data.User = UserInfo{
+		Username: userResp.User.GetName(),
+		UID:      userResp.User.GetUID(),
+		Groups:   userResp.User.GetGroups(),
+	}
+}
+
+const (
+	// AuthorizationHeader authorization header for http requests
+	AuthorizationHeader = "Authorization"
+	// BearerPrefix bearer token prefix for token
+	BearerPrefix = "Bearer "
+
+	// QueryParameterTokenName authorization token for http requests
+	QueryParameterTokenName = "token"
+)
+
+func GetToken(req *http.Request) (token string) {
+	authHeader := req.Header.Get(AuthorizationHeader)
+
+	if authHeader != "" && strings.HasPrefix(authHeader, BearerPrefix) && strings.TrimPrefix(authHeader, BearerPrefix) != "" {
+		token = strings.TrimPrefix(authHeader, BearerPrefix)
+		return
+	}
+
+	token = req.FormValue(QueryParameterTokenName)
+	return
 }
 
 func newTeeBody(rc io.ReadCloser, maxTee int) io.ReadCloser {

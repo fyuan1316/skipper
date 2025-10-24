@@ -1,6 +1,9 @@
 package k8sauditlog
 
-import metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+import (
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	auditinternal "k8s.io/apiserver/pkg/apis/audit"
+)
 
 type LogChannel chan RawLogData
 
@@ -9,24 +12,36 @@ const (
 	AuthRejectReasonKey     = "auth-reject-reason"
 	maxUserAgentLength      = 256
 	userAgentTruncateSuffix = "..."
+	anonymousUser           = "system:anonymous"
 )
 
 type RawLogData struct {
-	Method     string
-	RequestURI string // 对应 Event.RequestURI
-	Verb       string // 对应 Event.Verb (HTTP Method)
-	Status     int    // 对应 Event.ResponseStatus.Code
-	UserAgent  string // 对应 Event.UserAgent
+	Level          string           // 默认 RequestResponse, 支持: Metadata, Request
+	Stage          string           // 默认 ResponseComplete
+	RequestURI     string           // 对应 req.URL.RequestURI()
+	UserAgent      string           // 对应 maybeTruncateUserAgent(req)
+	RequestObject  string           // empty
+	ResponseObject string           // empty
+	ResponseStatus *metav1.Status   // .Status 和 .Code
+	ReceivedAt     metav1.MicroTime // 请求接收时间
+	StageTimestamp metav1.MicroTime // event 创建时的时间
+	AuditIDHeader  string           // header("Audit-ID") 获取 或 创建
+	SourceIPs      []string         // 对应 Event.SourceIPs
+	User           UserInfo         // 记录 .Username, UID, Groups, fallback= system:anonymous
+	Verb           string           // req.Method
+	ObjectRef      *auditinternal.ObjectReference
+}
 
-	SourceIPs []string // 对应 Event.SourceIPs
+type UserInfo struct {
+	Username string
+	UID      string
+	Groups   []string
+}
 
-	// --- Auth & Context ---
-	Username     string // 对应 Event.User.Username
-	RejectReason string // Skipper 内部拒绝理由
-
-	// --- Body & Time ---
-	RequestBody string           // 缓冲后的请求体 (对应 RequestObject)
-	ReceivedAt  metav1.MicroTime // 请求接收时间
-
-	AuditIDHeader string // 用于从 Filter 阶段传递审计 ID
+// maybeTruncateUserAgent
+func maybeTruncateUserAgent(ua string) string {
+	if len(ua) > maxUserAgentLength {
+		return ua[:maxUserAgentLength] + userAgentTruncateSuffix
+	}
+	return ua
 }
