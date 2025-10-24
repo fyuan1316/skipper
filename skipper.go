@@ -1014,8 +1014,12 @@ type Options struct {
 	EnableAdvancedValidation  bool
 
 	// k8s audit log
-	EnableK8sAuditLog bool
-	K8sAuditLogPath   string
+	EnableK8sAuditLog       bool
+	K8sAuditLogPath         string
+	K8sAuditLogCancelFunc   context.CancelFunc
+	K8sAuditLogDone         chan struct{}
+	K8sAuditLogChan         k8sauditlogfilter.LogChannel
+	K8sAuditLogMaxAuditBody int
 }
 
 func (o *Options) KubernetesDataClientOptions() kubernetes.Options {
@@ -1460,6 +1464,15 @@ func listenAndServeQuit(
 		if err := srv.Shutdown(context.Background()); err != nil {
 			log.Errorf("Failed to graceful shutdown: %v", err)
 		}
+
+		// if k8s AuditLog enabled, graceful shutdown
+		if o.K8sAuditLogCancelFunc != nil {
+			o.K8sAuditLogCancelFunc()
+		}
+		if o.K8sAuditLogDone != nil {
+			<-o.K8sAuditLogDone
+		}
+
 		close(idleConnsCH)
 	}()
 
@@ -1670,22 +1683,19 @@ func run(o Options, sig chan os.Signal, idleConnsCH chan struct{}) error {
 		log.Warning("no route source specified")
 	}
 
-	var logChannel k8sauditlogfilter.LogChannel
-	var logCollectorDone chan struct{}
-
-	// 假设 Options 中新增了 EnableK8sAuditLog 和 K8sAuditLogPath 字段
+	// if K8sAuditLogPath set, enable k8sAuditLog
 	if o.EnableK8sAuditLog {
-		// 1. 创建 Channel
-		logChannel = make(k8sauditlogfilter.LogChannel, 10000)
-		logCollectorDone = make(chan struct{})
+		o.K8sAuditLogChan = make(k8sauditlogfilter.LogChannel, 10000)
+		o.K8sAuditLogDone = make(chan struct{})
+		logCtx, logCancel := context.WithCancel(context.Background())
+		o.K8sAuditLogCancelFunc = logCancel
 
-		// 2. 启动 Collector Goroutine
 		k8sAuditOutput, err := getLogOutput(o.K8sAuditLogPath)
 		if err != nil {
 			return err
 		}
 
-		go k8sauditlogfilter.StartLogCollector(logChannel, k8sAuditOutput, logCollectorDone)
+		go k8sauditlogfilter.StartLogSinker(logCtx, o.K8sAuditLogChan, k8sAuditOutput, o.K8sAuditLogDone)
 
 		log.Infof("K8s Audit Logging enabled. Buffer size: 10000, Path: %s", o.K8sAuditLogPath)
 	}
@@ -1820,9 +1830,10 @@ func run(o Options, sig chan os.Signal, idleConnsCH chan struct{}) error {
 		admissionControlFilter,
 	)
 
-	if o.EnableK8sAuditLog && logChannel != nil {
-		k8sSpec := k8sauditlogfilter.NewK8sAuditLog(logChannel, o.MaxAuditBody)
-		o.CustomFilters = append(o.CustomFilters, k8sSpec)
+	if o.EnableK8sAuditLog {
+		o.CustomFilters = append(o.CustomFilters,
+			k8sauditlogfilter.NewK8sAuditLog(o.K8sAuditLogChan, o.K8sAuditLogMaxAuditBody),
+		)
 	}
 
 	if o.OIDCSecretsFile != "" {

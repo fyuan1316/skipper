@@ -1,6 +1,7 @@
 package k8sauditlog
 
 import (
+	"context"
 	"encoding/json"
 	"github.com/google/uuid"
 	"io"
@@ -13,14 +14,15 @@ import (
 	"time"
 )
 
+// -k8s-audit-log=/Users/yuan/Dev/lab/test-skipper/gitlab.log -inline-routes 'r: * -> k8sAuditLog() -> inlineContent("Hello world!") -> status(200) -> <shunt>'
+
 const (
-	statusSuccess = "Success" // 它被定义在这里
+	statusSuccess = "Success"
 	statusFailure = "Failure"
 )
 
-// StartLogCollector 启动一个专用 Goroutine 来处理日志 I/O 和 K8s 结构转换
-func StartLogCollector(ch LogChannel, k8sAuditOutput io.Writer, done chan struct{}) {
-	// 1. 确保在函数退出时通知主程序我们已完成
+// StartLogSinker 启动一个专用 Goroutine 来处理日志 I/O 和 K8s 结构转换
+func StartLogSinker(ctx context.Context, ch LogChannel, k8sAuditOutput io.Writer, done chan struct{}) {
 	defer close(done)
 	if k8sAuditOutput == nil {
 		return
@@ -30,35 +32,49 @@ func StartLogCollector(ch LogChannel, k8sAuditOutput io.Writer, done chan struct
 		closer = c
 	}
 	defer func() {
-		// 尝试 Sync (只针对 *os.File)
 		if f, ok := k8sAuditOutput.(*os.File); ok {
 			// log.Println("Log collector: Syncing...")
 			f.Sync()
 		}
 
-		// 尝试 Close (只在 closer 存在时执行)
 		if closer != nil {
-			// log.Println("Log collector: Closing output stream.")
 			closer.Close()
 		}
 	}()
 
-	for rawData := range ch {
-		// ... (4a, 4b JSON 编码) ...
-		ev := buildK8sAuditEvent(rawData)
-		data, err := json.Marshal(ev)
-		// ... (错误处理) ...
-		data = append(data, '\n')
+	for {
+		select {
+		case rawData, ok := <-ch:
+			if !ok {
+				// 输入通道关闭，退出循环，准备执行 defer 清理
+				//log("Log Collector: Input channel closed. Finishing processing.")
+				return
+			}
 
-		// 4c. 写入 (I/O 密集型)
-		_, err = k8sAuditOutput.Write(data)
-		if err != nil {
-			// log.Printf("Log collector: Failed to write K8s Audit Log: %v", err)
-		}
+			// ... (数据转换和写入逻辑) ...
+			ev := buildK8sAuditEvent(rawData)
+			data, err := json.Marshal(ev)
+			if err != nil {
+				//log("Log Collector: JSON Marshal error:", err)
+				continue
+			}
+			data = append(data, '\n')
 
-		// 4d. Sync (只针对 *os.File)
-		if f, ok := k8sAuditOutput.(*os.File); ok {
-			f.Sync()
+			_, err = k8sAuditOutput.Write(data)
+			if err != nil {
+				//log("Log Collector: Failed to write K8s Audit Log:", err)
+			}
+
+			// 4d. Sync (保持 I/O 密集型操作，因为 Context 还没有被取消)
+			if f, ok := k8sAuditOutput.(*os.File); ok {
+				f.Sync()
+			}
+
+		case <-ctx.Done():
+			// 接收到主程序的取消信号
+			//log("Log Collector: Received main context cancel signal. Stopping input reading.")
+			// 此时我们不立即 return，而是跳出 select，让 for 循环结束，从而触发 defer 清理
+			return
 		}
 	}
 }
