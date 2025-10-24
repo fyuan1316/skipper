@@ -39,7 +39,7 @@ func (a *asyncAuditLogFilter) CreateFilter(args []interface{}) (filters.Filter, 
 		return nil, filters.ErrInvalidFilterParameters
 	}
 
-	return &asyncAuditLogFilter{logCh: a.logCh, maxBodyLog: a.maxBodyLog}, nil
+	return &asyncAuditLogFilter{logCh: a.logCh, maxBodyLog: a.maxBodyLog, tokenParser: a.tokenParser}, nil
 }
 
 func (a *asyncAuditLogFilter) Request(ctx filters.FilterContext) {
