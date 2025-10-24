@@ -30,11 +30,11 @@ func NewK8sAuditLog(ch LogChannel, maxBody int) filters.Spec {
 	}
 }
 
-func (a asyncAuditLogFilter) Name() string {
+func (a *asyncAuditLogFilter) Name() string {
 	return "k8sAuditLog"
 }
 
-func (a asyncAuditLogFilter) CreateFilter(args []interface{}) (filters.Filter, error) {
+func (a *asyncAuditLogFilter) CreateFilter(args []interface{}) (filters.Filter, error) {
 	if len(args) != 0 {
 		return nil, filters.ErrInvalidFilterParameters
 	}
@@ -42,7 +42,7 @@ func (a asyncAuditLogFilter) CreateFilter(args []interface{}) (filters.Filter, e
 	return &asyncAuditLogFilter{logCh: a.logCh, maxBodyLog: a.maxBodyLog}, nil
 }
 
-func (a asyncAuditLogFilter) Request(ctx filters.FilterContext) {
+func (a *asyncAuditLogFilter) Request(ctx filters.FilterContext) {
 	req := ctx.Request()
 
 	ctx.StateBag()["requestRecievedTimestamp"] = metav1.NewMicroTime(time.Now())
@@ -62,7 +62,7 @@ func (a asyncAuditLogFilter) Request(ctx filters.FilterContext) {
 	}
 }
 
-func (a asyncAuditLogFilter) Response(ctx filters.FilterContext) {
+func (a *asyncAuditLogFilter) Response(ctx filters.FilterContext) {
 	req := ctx.Request()
 	rsp := ctx.Response()
 	sb := ctx.StateBag()
