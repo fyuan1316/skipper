@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"encoding/json"
 	"fmt"
+	k8sauditlogfilter "github.com/zalando/skipper/filters/k8sauditlog"
 	"io"
 	"net"
 	"net/http"
@@ -972,6 +973,14 @@ type Options struct {
 	OpenPolicyAgentMaxMemoryBodyParsing    int64
 
 	PassiveHealthCheck map[string]string
+
+	// k8s audit log
+	EnableK8sAuditLog       bool
+	K8sAuditLogPath         string
+	K8sAuditLogCancelFunc   context.CancelFunc
+	K8sAuditLogDone         chan struct{}
+	K8sAuditLogChan         k8sauditlogfilter.LogChannel
+	K8sAuditLogMaxAuditBody int
 }
 
 func (o *Options) KubernetesDataClientOptions() kubernetes.Options {
@@ -1415,6 +1424,15 @@ func listenAndServeQuit(
 		if err := srv.Shutdown(context.Background()); err != nil {
 			log.Errorf("Failed to graceful shutdown: %v", err)
 		}
+
+		// if k8s AuditLog enabled, graceful shutdown
+		if o.K8sAuditLogCancelFunc != nil {
+			o.K8sAuditLogCancelFunc()
+		}
+		if o.K8sAuditLogDone != nil {
+			<-o.K8sAuditLogDone
+		}
+
 		close(idleConnsCH)
 	}()
 
@@ -1623,6 +1641,23 @@ func run(o Options, sig chan os.Signal, idleConnsCH chan struct{}) error {
 		log.Warning("no route source specified")
 	}
 
+	// if K8sAuditLogPath set, enable k8sAuditLog
+	if o.EnableK8sAuditLog {
+		o.K8sAuditLogChan = make(k8sauditlogfilter.LogChannel, 10000)
+		o.K8sAuditLogDone = make(chan struct{})
+		logCtx, logCancel := context.WithCancel(context.Background())
+		o.K8sAuditLogCancelFunc = logCancel
+
+		k8sAuditOutput, err := getLogOutput(o.K8sAuditLogPath)
+		if err != nil {
+			return err
+		}
+
+		go k8sauditlogfilter.StartLogSinker(logCtx, o.K8sAuditLogChan, k8sAuditOutput, o.K8sAuditLogDone)
+
+		log.Infof("K8s Audit Logging enabled. Buffer size: 10000, Path: %s", o.K8sAuditLogPath)
+	}
+
 	o.PluginDirs = append(o.PluginDirs, o.PluginDir)
 
 	tracer, err := o.openTracingTracerInstance()
@@ -1723,6 +1758,12 @@ func run(o Options, sig chan os.Signal, idleConnsCH chan struct{}) error {
 		),
 		admissionControlFilter,
 	)
+
+	if o.EnableK8sAuditLog {
+		o.CustomFilters = append(o.CustomFilters,
+			k8sauditlogfilter.NewK8sAuditLog(o.K8sAuditLogChan, o.K8sAuditLogMaxAuditBody),
+		)
+	}
 
 	if o.OIDCSecretsFile != "" {
 		oidcClientId, _ := os.LookupEnv("OIDC_CLIENT_ID")
