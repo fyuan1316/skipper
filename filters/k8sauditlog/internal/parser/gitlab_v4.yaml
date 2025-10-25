@@ -1,0 +1,33 @@
+mappings:
+  - scope: graphql
+    resources:
+      - resource_type_name: graphql_graphql # 对应 /api/graphql
+        urls:
+          - /
+  - scope: user
+    resources:
+      - resource_type_name: user_details # 对应 /api/v4/users/1
+        urls:
+          - /users/:id
+  - scope: project
+    resources:
+      - resource_type_name: project_projects # 对应 /api/v4/projects?search_xxx
+        urls:
+          - /projects
+      - resource_type_name: project_details  # 对应 api/v4/projects/206
+        urls:
+          - /projects/:id # Base resource: Project itself
+      - resource_type_name: project_tags  # 对应 /api/v4/projects/206/repository/tags
+        urls:
+          - /projects/:id/repository/tags
+      - resource_type_name: project_commits
+        urls:
+          - /projects/:id/repository/commits
+          - /projects/:id/statuses
+      - resource_type_name: project_repository_files
+        urls:
+          - /projects/:id/repository/files
+      - resource_type_name: project_branches
+        urls:
+          - /projects/:id/repository/branches
+          - /projects/:id/repository/merged_branches

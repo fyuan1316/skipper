@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"context"
 	"github.com/google/uuid"
+	"github.com/zalando/skipper/eskip"
 	"github.com/zalando/skipper/filters"
+	"github.com/zalando/skipper/filters/k8sauditlog/internal/parser"
 	"io"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	utilnet "k8s.io/apimachinery/pkg/util/net"
@@ -15,23 +17,38 @@ import (
 	"time"
 )
 
+const (
+	NameSpace    = "p_bag_namespace"
+	ReqTs        = "p_bag_req_ts"
+	ResourceKind = "p_bag_resource_kind"
+	ResourceName = "p_bag_resource_name"
+	UserAgent    = "p_bag_user_agent"
+	SourceIPs    = "p_bag_source_ips"
+
+	NameSpaceTPL   = "${namespace}"
+	FakeApiGroup   = "gitlab.io"
+	FakeApiVersion = "v4"
+)
+
 type asyncAuditLogFilter struct {
 	logCh      LogChannel
 	maxBodyLog int
 
-	tokenParser authenticator.Token
+	tokenParser  authenticator.Token
+	namespaceTpl *eskip.Template
 }
 
 func NewK8sAuditLog(ch LogChannel, maxBody int) filters.Spec {
 	return &asyncAuditLogFilter{
-		logCh:       ch,
-		maxBodyLog:  maxBody,
-		tokenParser: NewOIDCTokenParser(),
+		logCh:        ch,
+		maxBodyLog:   maxBody,
+		tokenParser:  NewOIDCTokenParser(),
+		namespaceTpl: eskip.NewTemplate(NameSpaceTPL),
 	}
 }
 
 func (a *asyncAuditLogFilter) Name() string {
-	return "k8sAuditLog"
+	return "gitlabAuditLog"
 }
 
 func (a *asyncAuditLogFilter) CreateFilter(args []interface{}) (filters.Filter, error) {
@@ -39,23 +56,34 @@ func (a *asyncAuditLogFilter) CreateFilter(args []interface{}) (filters.Filter, 
 		return nil, filters.ErrInvalidFilterParameters
 	}
 
-	return &asyncAuditLogFilter{logCh: a.logCh, maxBodyLog: a.maxBodyLog, tokenParser: a.tokenParser}, nil
+	return &asyncAuditLogFilter{
+		logCh: a.logCh, maxBodyLog: a.maxBodyLog, tokenParser: a.tokenParser, namespaceTpl: a.namespaceTpl,
+	}, nil
 }
 
 func (a *asyncAuditLogFilter) Request(ctx filters.FilterContext) {
 	req := ctx.Request()
 
-	ctx.StateBag()["requestRecievedTimestamp"] = metav1.NewMicroTime(time.Now())
+	if resourceType, _, err := parser.ParseResourceType(req.RequestURI); err == nil {
+		ctx.StateBag()[ResourceKind] = resourceType
+	}
+	if resourceName, err := parser.PreprocessURLStrongBinding(req.RequestURI); err == nil {
+		ctx.StateBag()[ResourceName] = resourceName
+	}
+	if ns, ok := a.namespaceTpl.ApplyContext(ctx); ok {
+		ctx.StateBag()[NameSpace] = ns
+	}
+	ctx.StateBag()[ReqTs] = metav1.NewMicroTime(time.Now())
 
 	ua := req.Header.Get("User-Agent")
-	ctx.StateBag()["userAgent"] = ua
+	ctx.StateBag()[UserAgent] = ua
 
 	ips := utilnet.SourceIPs(req)
 	sourceIPs := make([]string, len(ips))
 	for i := range ips {
 		sourceIPs[i] = ips[i].String()
 	}
-	ctx.StateBag()["sourceIPs"] = sourceIPs
+	ctx.StateBag()[SourceIPs] = sourceIPs
 
 	if a.maxBodyLog > 0 {
 		ctx.Request().Body = newTeeBody(ctx.Request().Body, a.maxBodyLog)
@@ -67,9 +95,14 @@ func (a *asyncAuditLogFilter) Response(ctx filters.FilterContext) {
 	rsp := ctx.Response()
 	sb := ctx.StateBag()
 
-	reqTimeVal := sb["requestRecievedTimestamp"].(metav1.MicroTime)
-	userAgent, _ := sb["userAgent"].(string)
-	sourceIPs, _ := sb["sourceIPs"].([]string)
+	reqTimeVal := sb[ReqTs].(metav1.MicroTime)
+	userAgent, _ := sb[UserAgent].(string)
+	sourceIPs, _ := sb[SourceIPs].([]string)
+
+	var resKind, resName, ns string
+	resKind = sb[ResourceKind].(string)
+	resName = sb[ResourceName].(string)
+	ns = sb[NameSpace].(string)
 
 	reqBodyStr := ""
 	if tb, ok := req.Body.(*teeBody); ok {
@@ -100,9 +133,14 @@ func (a *asyncAuditLogFilter) Response(ctx filters.FilterContext) {
 		StageTimestamp: metav1.NewMicroTime(time.Now()),
 		AuditIDHeader:  ids,
 		SourceIPs:      sourceIPs,
-		//User:           userInfo,
-		Verb:      req.Method,
-		ObjectRef: &auditinternal.ObjectReference{},
+		Verb:           req.Method,
+		ObjectRef: &auditinternal.ObjectReference{
+			APIGroup:   FakeApiGroup,
+			APIVersion: FakeApiVersion,
+			Resource:   resKind,
+			Namespace:  ns,
+			Name:       resName,
+		},
 	}
 	ProcessUserInfo(a.tokenParser, &rawData, req)
 

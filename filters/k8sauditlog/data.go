@@ -8,8 +8,6 @@ import (
 type LogChannel chan RawLogData
 
 const (
-	AuthUserKey             = "auth-user"
-	AuthRejectReasonKey     = "auth-reject-reason"
 	maxUserAgentLength      = 256
 	userAgentTruncateSuffix = "..."
 	anonymousUser           = "system:anonymous"
